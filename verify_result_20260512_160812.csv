@@ -1,0 +1,5 @@
+﻿ip,username,protocol,status,message,elapsed
+192.168.6.252,sjyglj,ssh,FAIL,SSH 异常: Incompatible ssh peer (no acceptable kex algorithm),0.12
+192.168.6.253,sjyglj,ssh,FAIL,SSH 异常: Incompatible ssh peer (no acceptable kex algorithm),0.16
+192.168.6.250,sjyglj,ssh,FAIL,SSH 异常: Incompatible ssh peer (no acceptable kex algorithm),0.11
+192.168.6.251,sjyglj,ssh,FAIL,SSH 异常: Incompatible ssh peer (no acceptable kex algorithm),0.12

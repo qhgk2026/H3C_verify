@@ -14,7 +14,9 @@ import time
 import socket
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 # ---------- 尝试导入 paramiko ----------
 try:
@@ -34,6 +36,46 @@ try:
 except ImportError:
     TELNET_OK = False
     print("[警告] telnetlib 不可用（Python 3.12+ 已移除），Telnet 验证不可用。")
+
+
+DEFAULT_SSH_PORT = 22
+DEFAULT_TELNET_PORT = 23
+
+
+@dataclass
+class SwitchConfig:
+    ip: str
+    username: str
+    password: str
+    protocol: str = "ssh"
+    port: Optional[int] = None
+
+
+@dataclass
+class VerifyResult:
+    ip: str
+    username: str
+    protocol: str
+    status: str
+    message: str
+    elapsed: float
+
+
+def normalize_protocol(value: str) -> str:
+    value = (value or "ssh").strip().lower()
+    return "telnet" if value == "telnet" else "ssh"
+
+
+def parse_port(value: str, default_port: int) -> Optional[int]:
+    if value is None:
+        return default_port
+    value = value.strip()
+    if not value:
+        return default_port
+    try:
+        return int(value)
+    except ValueError:
+        return default_port
 
 
 # ============================================================
@@ -176,24 +218,32 @@ def verify_telnet(ip, username, password, port=23, timeout=10):
                 pass
 
 
-def verify_switch(ip, username, password, protocol="ssh", port=None, timeout=10):
+def verify_switch(switch: SwitchConfig, timeout=10) -> VerifyResult:
     """
     验证单台交换机的登录凭据
-    返回: (ip, username, protocol, status, message, elapsed_seconds)
+    返回: VerifyResult
     """
-    if port is None:
-        port = 22 if protocol.lower() == "ssh" else 23
+    port = switch.port if switch.port is not None else (
+        DEFAULT_SSH_PORT if switch.protocol == "ssh" else DEFAULT_TELNET_PORT
+    )
 
     start = time.time()
-    if protocol.lower() == "ssh":
-        status, msg = verify_ssh(ip, username, password, int(port), timeout)
-    elif protocol.lower() == "telnet":
-        status, msg = verify_telnet(ip, username, password, int(port), timeout)
+    if switch.protocol == "ssh":
+        status, message = verify_ssh(switch.ip, switch.username, switch.password, port, timeout)
+    elif switch.protocol == "telnet":
+        status, message = verify_telnet(switch.ip, switch.username, switch.password, port, timeout)
     else:
-        status, msg = "SKIP", f"不支持的协议: {protocol}"
-    elapsed = round(time.time() - start, 2)
+        status, message = "SKIP", f"不支持的协议: {switch.protocol}"
 
-    return (ip, username, protocol, status, msg, elapsed)
+    elapsed = round(time.time() - start, 2)
+    return VerifyResult(
+        ip=switch.ip,
+        username=switch.username,
+        protocol=switch.protocol,
+        status=status,
+        message=message,
+        elapsed=elapsed,
+    )
 
 
 # ============================================================
@@ -202,29 +252,34 @@ def verify_switch(ip, username, password, protocol="ssh", port=None, timeout=10)
 
 def load_switches(filepath):
     """
-    读取 CSV 文件，返回列表
+    读取 CSV 文件，返回 SwitchConfig 列表
     CSV 格式：ip,username,password,protocol,port
     protocol 和 port 列可选，默认 ssh / 22
     """
     switches = []
     with open(filepath, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(f, skipinitialspace=True)
         for row in reader:
-            ip = row.get("ip", "").strip()
-            username = row.get("username", "").strip()
-            password = row.get("password", "").strip()
-            protocol = row.get("protocol", "ssh").strip()
-            port = row.get("port", "").strip()
+            if not row:
+                continue
+
+            ip = (row.get("ip") or row.get("IP") or "").strip()
+            username = (row.get("username") or row.get("Username") or "").strip()
+            password = (row.get("password") or row.get("Password") or "").strip()
+            protocol = normalize_protocol(row.get("protocol") or row.get("Protocol") or "ssh")
+            port = parse_port(row.get("port") or row.get("Port") or "", DEFAULT_SSH_PORT)
+
             if not ip or not username or not password:
                 print(f"[跳过] 数据不完整: {row}")
                 continue
-            switches.append({
-                "ip": ip,
-                "username": username,
-                "password": password,
-                "protocol": protocol if protocol else "ssh",
-                "port": port if port else None,
-            })
+
+            switches.append(SwitchConfig(
+                ip=ip,
+                username=username,
+                password=password,
+                protocol=protocol,
+                port=port,
+            ))
     return switches
 
 
@@ -271,48 +326,35 @@ def main():
 
     # 多线程并发验证
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {}
-        for sw in switches:
-            future = executor.submit(
-                verify_switch,
-                sw["ip"], sw["username"], sw["password"],
-                sw["protocol"], sw["port"], args.timeout
-            )
-            futures[future] = sw
+        future_to_switch = {
+            executor.submit(verify_switch, sw, args.timeout): sw
+            for sw in switches
+        }
 
-        for future in as_completed(futures):
+        for future in as_completed(future_to_switch):
             completed += 1
-            ip, username, protocol, status, msg, elapsed = future.result()
+            result = future.result()
 
-            # 状态图标
             icon = {
                 "OK": "✅",
                 "FAIL": "❌",
                 "SKIP": "⏭️",
                 "UNKNOWN": "❓",
-            }.get(status, "❓")
+            }.get(result.status, "❓")
 
-            # 实时输出
             print(
-                f"  [{completed}/{len(switches)}] {icon} {ip:15s} | "
-                f"{username:10s} | {protocol:6s} | {status:7s} | "
-                f"{elapsed:5.1f}s | {msg}"
+                f"  [{completed}/{len(switches)}] {icon} {result.ip:15s} | "
+                f"{result.username:10s} | {result.protocol:6s} | {result.status:7s} | "
+                f"{result.elapsed:5.1f}s | {result.message}"
             )
 
-            results.append({
-                "ip": ip,
-                "username": username,
-                "protocol": protocol,
-                "status": status,
-                "message": msg,
-                "elapsed": elapsed,
-            })
+            results.append(result)
 
     # ---------- 统计汇总 ----------
-    ok_count = sum(1 for r in results if r["status"] == "OK")
-    fail_count = sum(1 for r in results if r["status"] == "FAIL")
-    skip_count = sum(1 for r in results if r["status"] == "SKIP")
-    unknown_count = sum(1 for r in results if r["status"] == "UNKNOWN")
+    ok_count = sum(1 for r in results if r.status == "OK")
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    skip_count = sum(1 for r in results if r.status == "SKIP")
+    unknown_count = sum(1 for r in results if r.status == "UNKNOWN")
 
     print(f"\n{'='*60}")
     print(f"  验证完成")
@@ -330,7 +372,7 @@ def main():
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=["ip", "username", "protocol", "status", "message", "elapsed"])
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows([r.__dict__ for r in results])
 
     print(f"  结果已保存至: {output_path}")
 
@@ -338,8 +380,8 @@ def main():
     if fail_count > 0:
         print(f"\n  --- 失败设备清单 ---")
         for r in results:
-            if r["status"] == "FAIL":
-                print(f"    {r['ip']:15s} | {r['username']:10s} | {r['message']}")
+            if r.status == "FAIL":
+                print(f"    {r.ip:15s} | {r.username:10s} | {r.message}")
         print()
 
     # 返回退出码：全部成功返回0，有失败返回1
