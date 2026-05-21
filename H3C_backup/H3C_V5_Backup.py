@@ -54,6 +54,7 @@ class H3CV5Connector:
         self.protocol = protocol
         self.timeout = timeout
         self.log = log_callback or (lambda msg: None)
+        self.encoding = 'gbk'  # H3C V5 默认 GBK 编码
         self.client = None
         self.channel = None
 
@@ -85,10 +86,10 @@ class H3CV5Connector:
         self.channel = telnetlib.Telnet(self.host, port, timeout=self.timeout)
         # 等待用户名提示
         self.channel.read_until(b'Username:', timeout=self.timeout)
-        self.channel.write(self.username.encode() + b'\n')
+        self.channel.write(self.username.encode(self.encoding) + b'\n')
         # 等待密码提示
         self.channel.read_until(b'Password:', timeout=self.timeout)
-        self.channel.write(self.password.encode() + b'\n')
+        self.channel.write(self.password.encode(self.encoding) + b'\n')
         # 等待提示符
         self._read_until_prompt()
         # 关闭分屏
@@ -126,23 +127,23 @@ class H3CV5Connector:
                     break
                 buf += data
                 # 检查是否匹配提示符
-                text = buf.decode('utf-8', errors='replace').strip()
+                text = self._try_decode(buf).strip()
                 for pat in self.PROMPTS:
                     if re.search(pat, buf[-50:]):
-                        return buf.decode('utf-8', errors='replace')
+                        return self._try_decode(buf)
                 time.sleep(0.1)
             except socket.timeout:
                 break
             except Exception:
                 time.sleep(0.1)
-        return buf.decode('utf-8', errors='replace')
+        return self._try_decode(buf)
 
     def _send_command(self, cmd):
-        """发送命令"""
+        """发送命令（使用设备编码）"""
         if self.protocol == 'ssh' and self.channel:
-            self.channel.sendall(cmd.encode() + b'\n')
+            self.channel.sendall(cmd.encode(self.encoding) + b'\n')
         elif self.protocol == 'telnet' and self.channel:
-            self.channel.write(cmd.encode() + b'\n')
+            self.channel.write(cmd.encode(self.encoding) + b'\n')
 
     def get_config(self):
         """获取当前配置"""
@@ -210,7 +211,7 @@ class H3CV5Connector:
                     continue
 
                 buf += data
-                text = buf.decode('utf-8', errors='replace')
+                text = self._try_decode(buf)
 
                 # 处理 More 提示 - 发送空格继续
                 if '---- More ----' in text or '----More----' in text or '--More--' in text:
@@ -228,7 +229,7 @@ class H3CV5Connector:
                     if re.search(pat_str, last_chunk):
                         # 已回到提示符，输出结束
                         time.sleep(0.3)
-                        result = buf.decode('utf-8', errors='replace')
+                        result = self._try_decode(buf)
                         return self._clean_output(result)
 
                 if time.time() - start > 120:  # 2分钟总超时
@@ -241,8 +242,20 @@ class H3CV5Connector:
                 self.log(f"  ⚠ 读取异常: {e}")
                 break
 
-        result = buf.decode('utf-8', errors='replace')
+        result = self._try_decode(buf)
         return self._clean_output(result)
+
+    def _try_decode(self, data):
+        """智能解码：优先 GBK（中文），失败则 UTF-8，避免乱码"""
+        if isinstance(data, str):
+            return data
+        try:
+            return data.decode('gbk')
+        except (UnicodeDecodeError, AttributeError):
+            try:
+                return data.decode('utf-8', errors='replace')
+            except (UnicodeDecodeError, AttributeError):
+                return data.decode('latin-1', errors='replace')
 
     def _clean_output(self, text):
         """清理输出内容，移除控制字符和提示符"""
@@ -423,7 +436,7 @@ class H3CBackupApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("H3C V5 交换机批量配置备份工具QHGK-2025-05-19")
+        self.root.title("H3C V5 交换机批量配置备份工具QHGK-20250520")
         self.root.geometry("960x720")
         self.root.minsize(800, 600)
 
@@ -458,7 +471,7 @@ class H3CBackupApp:
         # 标题
         title_frame = ttk.Frame(main)
         title_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(title_frame, text="🖥 H3C Comware V5 批量配置备份-ZM20260519", style='Title.TLabel').pack(side=tk.LEFT)
+        ttk.Label(title_frame, text="🖥 H3C Comware V5 批量配置备份 ZM20260520", style='Title.TLabel').pack(side=tk.LEFT)
         ttk.Label(title_frame, text="支持 SSH / Telnet 连接", foreground='gray').pack(side=tk.RIGHT, padx=10)
 
         # ===== 连接设置区 =====
